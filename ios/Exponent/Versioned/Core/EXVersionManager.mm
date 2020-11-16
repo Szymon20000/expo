@@ -45,8 +45,11 @@
 #import "EXScopedModuleRegistryAdapter.h"
 #import "EXScopedModuleRegistryDelegate.h"
 
-#import "REATurboModuleProvider.h"
 #import "REAModule.h"
+#import "REAEventDispatcher.h"
+#import <React/RCTBridge+Private.h>
+#import "NativeProxy.h"
+#import <React/RCTCxxBridgeDelegate.h>
 
 #import <React/RCTCxxBridgeDelegate.h>
 #import <React/CoreModulesPlugins.h>
@@ -55,6 +58,12 @@
 #import <strings.h>
 
 RCT_EXTERN NSDictionary<NSString *, NSDictionary *> *EXGetScopedModuleClasses(void);
+
+@interface RCTEventDispatcher(REAnimated)
+
+- (void)setBridge:(RCTBridge*)bridge;
+
+@end
 
 // this is needed because RCTPerfMonitor does not declare a public interface
 // anywhere that we can import.
@@ -275,7 +284,6 @@ RCT_EXTERN NSDictionary<NSString *, NSDictionary *> *EXGetScopedModuleClasses(vo
 
 - (NSArray *)extraModulesForBridge:(id)bridge
 {
-  _bridge_reanimated = bridge;
   NSDictionary *params = _params;
   NSDictionary *manifest = params[@"manifest"];
   NSString *experienceId = manifest[@"id"];
@@ -388,15 +396,6 @@ RCT_EXTERN NSDictionary<NSString *, NSDictionary *> *EXGetScopedModuleClasses(vo
   return RCTCoreModulesClassProvider(name);
 }
 
-/**
- Returns a pure C++ object wrapping an exported unimodule instance.
- */
-- (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:(const std::string &)name
-                                                      jsInvoker:(std::shared_ptr<facebook::react::CallInvoker>)jsInvoker
-{
-  return facebook::react::REATurboModuleProvider(name, jsInvoker);
-}
-
 - (id<RCTTurboModule>)getModuleInstanceFromClass:(Class)moduleClass
 {
   // Standard
@@ -465,16 +464,24 @@ RCT_EXTERN NSDictionary<NSString *, NSDictionary *> *EXGetScopedModuleClasses(vo
 
 - (void *)versionedJsExecutorFactoryForBridge:(RCTBridge *)bridge
 {
-  UM_WEAKIFY(self);
-  return new facebook::react::JSCExecutorFactory([UMWeak_self, bridge](facebook::jsi::Runtime &runtime) {
+  [bridge moduleForClass:[RCTEventDispatcher class]];
+  RCTEventDispatcher *eventDispatcher = [REAEventDispatcher new];
+  [eventDispatcher setBridge:bridge];
+  [bridge updateModuleWithInstance:eventDispatcher];
+   _bridge_reanimated = bridge;
+  __weak __typeof(self) weakSelf = self;
+  return new facebook::react::JSCExecutorFactory([weakSelf, bridge](facebook::jsi::Runtime &runtime) {
     if (!bridge) {
       return;
     }
-    UM_ENSURE_STRONGIFY(self);
-    self->_turboModuleManager = [[RCTTurboModuleManager alloc] initWithBridge:bridge
-                                                                     delegate:self
-                                                                    jsInvoker:bridge.jsCallInvoker];
-    [self->_turboModuleManager installJSBindingWithRuntime:&runtime];
+    __typeof(self) strongSelf = weakSelf;
+    if (strongSelf) {
+      auto reanimatedModule = reanimated::createReanimatedModule(bridge.jsCallInvoker);
+      runtime.global().setProperty(runtime,
+                                   jsi::PropNameID::forAscii(runtime, "__reanimatedModuleProxy"),
+                                   jsi::Object::createFromHostObject(runtime, reanimatedModule)
+      );
+    }
   });
 }
 
